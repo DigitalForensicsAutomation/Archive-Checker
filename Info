@@ -1,0 +1,25 @@
+
+7-Zip Multi-Part Archive Monitor
+Code 
+I've created a PowerShell script that continuously monitors for multi-part 7-zip archives. Here's what it does:
+
+Key Features:
+
+Runs Forever: Continuously checks the monitored folder at configurable intervals
+Multi-Part Detection: Recognizes common formats (.7z.001, .001, .part1.rar, .z01)
+Completeness Check: Waits until all parts are present and file sizes stabilize (not still downloading)
+Integrity Testing: Uses 7-Zip's test command to verify archives are working
+Parallel Processing: Can check multiple archives simultaneously without blocking
+Safe Moving: Only moves archives to "Ready" folder after successful testing
+Before Running:
+
+Update the configuration paths at the top:
+$monitorPath - where your incoming archives are
+$readyPath - where verified archives should go
+$sevenZipPath - path to 7z.exe (default is standard installation)
+Adjust $checkInterval if you want more/less frequent checks
+To Run:
+
+powershell
+.\archive-monitor.ps1
+The script will create the folders if they don't exist and run continuously until you press Ctrl+C to stop it.
