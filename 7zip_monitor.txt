@@ -1,0 +1,180 @@
+# 7-Zip Multi-Part Archive Monitor and Validator
+# This script continuously monitors a folder for multi-part 7-zip archives,
+# tests them when complete, and moves verified archives to a ready folder.
+
+# Configuration
+$monitorPath = "C:\Archives\Incoming"  # Change to your source folder
+$readyPath = "C:\Archives\Ready"       # Change to your destination folder
+$sevenZipPath = "C:\Program Files\7-Zip\7z.exe"  # Path to 7z.exe
+$checkInterval = 30  # Seconds between checks
+
+# Create folders if they don't exist
+if (-not (Test-Path $monitorPath)) {
+    New-Item -ItemType Directory -Path $monitorPath -Force | Out-Null
+    Write-Host "Created monitor folder: $monitorPath" -ForegroundColor Green
+}
+
+if (-not (Test-Path $readyPath)) {
+    New-Item -ItemType Directory -Path $readyPath -Force | Out-Null
+    Write-Host "Created ready folder: $readyPath" -ForegroundColor Green
+}
+
+# Verify 7-Zip is installed
+if (-not (Test-Path $sevenZipPath)) {
+    Write-Host "ERROR: 7-Zip not found at $sevenZipPath" -ForegroundColor Red
+    Write-Host "Please install 7-Zip or update the path in the script." -ForegroundColor Yellow
+    exit 1
+}
+
+Write-Host "=== 7-Zip Multi-Part Archive Monitor ===" -ForegroundColor Cyan
+Write-Host "Monitor Path: $monitorPath" -ForegroundColor White
+Write-Host "Ready Path: $readyPath" -ForegroundColor White
+Write-Host "Check Interval: $checkInterval seconds" -ForegroundColor White
+Write-Host "Press Ctrl+C to stop the script" -ForegroundColor Yellow
+Write-Host ""
+
+# Function to get all parts of a multi-part archive
+function Get-ArchiveParts {
+    param($baseName, $extension, $folderPath)
+    
+    # Common multi-part patterns: .7z.001, .001, .part1.rar, etc.
+    $patterns = @(
+        "$baseName.7z.[0-9]*",
+        "$baseName.[0-9]*",
+        "$baseName.part[0-9]*.rar",
+        "$baseName.z[0-9]*"
+    )
+    
+    $allParts = @()
+    foreach ($pattern in $patterns) {
+        $parts = Get-ChildItem -Path $folderPath -Filter $pattern -ErrorAction SilentlyContinue
+        if ($parts) {
+            $allParts += $parts
+        }
+    }
+    
+    return $allParts | Sort-Object Name
+}
+
+# Function to check if archive is complete
+function Test-ArchiveComplete {
+    param($firstPart)
+    
+    $folder = Split-Path $firstPart.FullName
+    $baseName = $firstPart.BaseName -replace '\.(7z|part\d+|z\d+|\d+)$', ''
+    
+    # Get all parts
+    $parts = Get-ArchiveParts -baseName $baseName -extension $firstPart.Extension -folderPath $folder
+    
+    if ($parts.Count -eq 0) {
+        return $false
+    }
+    
+    # Check if files are still being written (file size changing)
+    Start-Sleep -Milliseconds 500
+    $sizeCheck = $true
+    foreach ($part in $parts) {
+        $size1 = (Get-Item $part.FullName).Length
+        Start-Sleep -Milliseconds 500
+        $size2 = (Get-Item $part.FullName).Length
+        if ($size1 -ne $size2) {
+            $sizeCheck = $false
+            break
+        }
+    }
+    
+    return $sizeCheck
+}
+
+# Function to test archive integrity with 7-Zip
+function Test-ArchiveIntegrity {
+    param($archivePath)
+    
+    Write-Host "  Testing archive: $archivePath" -ForegroundColor Yellow
+    
+    $testResult = & $sevenZipPath t "$archivePath" -bsp1
+    
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  ✓ Archive test PASSED" -ForegroundColor Green
+        return $true
+    } else {
+        Write-Host "  ✗ Archive test FAILED (Exit code: $LASTEXITCODE)" -ForegroundColor Red
+        return $false
+    }
+}
+
+# Function to move archive parts to ready folder
+function Move-ArchiveToReady {
+    param($firstPart)
+    
+    $folder = Split-Path $firstPart.FullName
+    $baseName = $firstPart.BaseName -replace '\.(7z|part\d+|z\d+|\d+)$', ''
+    
+    # Get all parts
+    $parts = Get-ArchiveParts -baseName $baseName -extension $firstPart.Extension -folderPath $folder
+    
+    Write-Host "  Moving $($parts.Count) file(s) to ready folder..." -ForegroundColor Cyan
+    
+    foreach ($part in $parts) {
+        $destPath = Join-Path $readyPath $part.Name
+        Move-Item -Path $part.FullName -Destination $destPath -Force
+        Write-Host "    Moved: $($part.Name)" -ForegroundColor Gray
+    }
+    
+    Write-Host "  ✓ Archive moved successfully" -ForegroundColor Green
+}
+
+# Track processed archives to avoid duplicate processing
+$processedArchives = @{}
+
+# Main monitoring loop
+while ($true) {
+    try {
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        Write-Host "[$timestamp] Checking for archives..." -ForegroundColor Cyan
+        
+        # Find potential first parts of multi-part archives
+        $firstParts = Get-ChildItem -Path $monitorPath -File | Where-Object {
+            $_.Name -match '\.(7z\.001|001|part1\.rar|part01\.rar|z01)$' -or
+            ($_.Extension -eq '.7z' -and -not ($_.Name -match '\.\d{3}$'))
+        }
+        
+        if ($firstParts.Count -eq 0) {
+            Write-Host "  No archives found." -ForegroundColor Gray
+        } else {
+            Write-Host "  Found $($firstParts.Count) potential archive(s)" -ForegroundColor White
+            
+            foreach ($firstPart in $firstParts) {
+                $archiveKey = $firstPart.Name
+                
+                Write-Host ""
+                Write-Host "Processing: $archiveKey" -ForegroundColor White
+                
+                # Check if archive is complete
+                if (Test-ArchiveComplete -firstPart $firstPart) {
+                    # Test archive integrity
+                    if (Test-ArchiveIntegrity -archivePath $firstPart.FullName) {
+                        # Move to ready folder
+                        Move-ArchiveToReady -firstPart $firstPart
+                        $processedArchives[$archiveKey] = $true
+                    } else {
+                        Write-Host "  ⚠ Archive failed integrity test. Leaving in place." -ForegroundColor Red
+                    }
+                } else {
+                    Write-Host "  ⏳ Archive incomplete or still downloading. Waiting..." -ForegroundColor Yellow
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "Waiting $checkInterval seconds until next check..." -ForegroundColor Gray
+        Write-Host ("=" * 60) -ForegroundColor DarkGray
+        Write-Host ""
+        
+        Start-Sleep -Seconds $checkInterval
+        
+    } catch {
+        Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
+        Start-Sleep -Seconds $checkInterval
+    }
+}
